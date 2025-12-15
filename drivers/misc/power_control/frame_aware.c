@@ -56,10 +56,14 @@
 #define MAX_APP_NAME_LEN 128
 #define MAX_APPS_PER_CATEGORY 500
 
+// 新增：定义用于息屏时开启的小核数量
+#define SCREEN_OFF_LITTLE_CORES_COUNT 2
+
 static cpumask_t little_mask;
 static cpumask_t big_mask;
 static cpumask_t all_mask;
 static cpumask_t screen_off_mask;
+static cpumask_t screen_off_little_mask; // 新增：息屏时开启的小核心掩码
 
 static struct input_handler fa_input_handler;
 static pid_t fg_pid = 0;
@@ -130,7 +134,17 @@ static void init_masks(void)
         }
     }
     cpumask_copy(&all_mask, cpu_possible_mask);
-    cpumask_copy(&screen_off_mask, &little_mask);
+    
+    // 初始化屏幕关闭时的CPU掩码 - 只开启前2个小核
+    cpumask_clear(&screen_off_little_mask);
+    for (i = LITTLE_START; i < LITTLE_START + SCREEN_OFF_LITTLE_CORES_COUNT && i <= LITTLE_END; i++) {
+        if (cpu_possible(i)) {
+            cpumask_set_cpu(i, &screen_off_little_mask);
+        }
+    }
+    
+    // 屏幕关闭时，所有任务只能运行在开启的小核上
+    cpumask_copy(&screen_off_mask, &screen_off_little_mask);
 }
 
 static bool check_cpufreq_ready(void)
@@ -171,6 +185,38 @@ static void safe_set_cpu_freq(const cpumask_t *mask, unsigned int khz)
         cpufreq_cpu_put(policy);
     }
 #endif
+}
+
+// 新增：关闭指定CPU核心
+static void safe_offline_cpu(int cpu)
+{
+    if (cpu_online(cpu) && cpu != 0) { // 保持CPU0在线
+        cpu_down(cpu);
+        pr_info("FA: CPU%d offline\n", cpu);
+    }
+}
+
+// 新增：开启指定CPU核心
+static void safe_online_cpu(int cpu)
+{
+    if (!cpu_online(cpu)) {
+        cpu_up(cpu);
+        pr_info("FA: CPU%d online\n", cpu);
+    }
+}
+
+// 新增：设置CPU核心在线状态
+static void safe_set_cpu_online_state(const cpumask_t *mask, bool online)
+{
+    int cpu;
+    
+    for_each_cpu(cpu, mask) {
+        if (online) {
+            safe_online_cpu(cpu);
+        } else {
+            safe_offline_cpu(cpu);
+        }
+    }
 }
 
 static void safe_set_all_big_core_freq(unsigned int khz)
@@ -491,10 +537,32 @@ static void exit_screen_idle_mode(void)
 static void schedule_screen_off_mode(void)
 {
     struct task_struct *p;
+    int cpu;
+    
     if (screen_off_processed)
         return;
-    safe_set_all_little_core_freq(LOCK_FREQ_KHZ);
-    safe_set_all_big_core_freq(BIG_CORE_IDLE_FREQ_KHZ);
+    
+    pr_info("FA: Entering screen off mode - keeping only 2 little cores online\n");
+    
+    // 关闭所有大核
+    for_each_cpu(cpu, &big_mask) {
+        safe_offline_cpu(cpu);
+    }
+    
+    // 关闭不需要的小核（保留前2个）
+    for_each_cpu(cpu, &little_mask) {
+        if (!cpumask_test_cpu(cpu, &screen_off_little_mask)) {
+            safe_offline_cpu(cpu);
+        }
+    }
+    
+    // 确保保留的小核在线
+    safe_set_cpu_online_state(&screen_off_little_mask, true);
+    
+    // 设置保留小核的频率为最低
+    safe_set_cpu_freq(&screen_off_little_mask, LITTLE_CORE_MIN_KHZ);
+    
+    // 将所有任务迁移到保留的小核上
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -502,17 +570,31 @@ static void schedule_screen_off_mode(void)
         if (p->pid <= 100)
             continue;
         set_user_nice(p, 19);
-        set_cpus_allowed_ptr(p, &little_mask);
+        set_cpus_allowed_ptr(p, &screen_off_mask);
     }
     rcu_read_unlock();
+    
     screen_off_processed = true;
 }
 
 static void schedule_screen_on_mode(void)
 {
     struct task_struct *p;
+    int cpu;
+    
+    pr_info("FA: Exiting screen off mode - bringing all cores online\n");
+    
+    // 开启所有CPU核心
+    for_each_cpu(cpu, &all_mask) {
+        safe_online_cpu(cpu);
+    }
+    
+    // 设置所有小核频率为最低
     safe_set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
+    // 设置所有大核频率为中频
     safe_set_all_big_core_freq(BIG_CORE_MID_FREQ_KHZ);
+    
+    // 将所有任务迁移到所有核心上
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -523,6 +605,7 @@ static void schedule_screen_on_mode(void)
         set_cpus_allowed_ptr(p, &all_mask);
     }
     rcu_read_unlock();
+    
     screen_off_processed = false;
     screen_idle_mode = false;
     if (fa_wq && !module_exiting) {
@@ -659,30 +742,43 @@ static void load_boost_config(void)
     char *pkg_end = NULL;
     int current_category = -1;
     int i = 0;
+    int total_apps = 0;
+    
     free_categories();
+    
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
+        pr_info("FA: Cannot open boost config file: %s\n", BOOST_JSON_PATH);
         return;
     }
+    
+    pr_info("FA: Loading boost config from: %s\n", BOOST_JSON_PATH);
+    
     json = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!json) {
         filp_close(fp, NULL);
+        pr_err("FA: Failed to allocate memory for config file\n");
         return;
     }
+    
     kernel_read(fp, json, MAX_JSON_FILE_SIZE - 1, &pos);
     filp_close(fp, NULL);
+    
     mutex_lock(&category_lock);
     line = fa_strtok_r(json, "\n", &saveptr);
     while (line != NULL) {
         if (strstr(line, "[0-3")) {
             current_category = 0;
             i = 0;
+            pr_info("FA: Found category 0-3 (little cores)\n");
         } else if (strstr(line, "[4-7")) {
             current_category = 1;
             i = 0;
+            pr_info("FA: Found category 4-7 (big cores)\n");
         } else if (strstr(line, "[0-7")) {
             current_category = 2;
             i = 0;
+            pr_info("FA: Found category 0-7 (all cores)\n");
         } else if (current_category >= 0) {
             if (strstr(line, "\"")) {
                 pkg_start = strchr(line, '\"');
@@ -695,20 +791,29 @@ static void load_boost_config(void)
                             if (app_categories[current_category][i]) {
                                 strncpy(app_categories[current_category][i], pkg_start + 1, len);
                                 app_categories[current_category][i][len] = '\0';
+                                pr_info("FA: Added app to category %d: %s\n", 
+                                        current_category, app_categories[current_category][i]);
                                 i++;
                                 app_counts[current_category] = i;
+                                total_apps++;
                             }
                         }
                     }
                 }
             }
             if (strstr(line, "]")) {
+                pr_info("FA: Category %d loaded %d apps\n", current_category, i);
                 current_category = -1;
             }
         }
         line = fa_strtok_r(NULL, "\n", &saveptr);
     }
     mutex_unlock(&category_lock);
+    
+    pr_info("FA: Boost config loaded successfully. Total apps: %d\n", total_apps);
+    pr_info("FA: Category breakdown - 0-3: %d, 4-7: %d, 0-7: %d\n",
+            app_counts[0], app_counts[1], app_counts[2]);
+    
     kfree(json);
 }
 
@@ -830,12 +935,16 @@ static void boot_complete_work_func(struct work_struct *work)
         int rc = input_register_handler(&fa_input_handler);
         if (rc == 0) {
             input_handler_registered = true;
+            pr_info("FA: Input handler registered successfully\n");
+        } else {
+            pr_err("FA: Failed to register input handler: %d\n", rc);
         }
     }
     if (screen_on && fa_wq && !module_exiting) {
         queue_delayed_work(fa_wq, &check_work, msecs_to_jiffies(CHECK_INTERVAL_MS));
         queue_delayed_work(fa_wq, &idle_check_work, msecs_to_jiffies(IDLE_NO_TOUCH_DELAY_MS));
         queue_delayed_work(fa_wq, &freq_adjust_work, msecs_to_jiffies(1000));
+        pr_info("FA: Scheduler work started\n");
     }
 }
 
@@ -928,6 +1037,7 @@ static int fb_notif_call(struct notifier_block *nb,
             last_touch_jiffies = jiffies;
             cancel_delayed_work(&screen_off_work);
             schedule_screen_on_mode();
+            pr_info("FA: Screen turned on, all cores activated\n");
             if (fa_wq && !module_exiting) {
                 queue_work(fa_wq, &boost_work);
             }
@@ -939,6 +1049,7 @@ static int fb_notif_call(struct notifier_block *nb,
             cancel_delayed_work(&idle_check_work);
             cancel_delayed_work(&freq_adjust_work);
             cancel_delayed_work(&screen_off_work);
+            pr_info("FA: Screen turned off, preparing to shut down cores\n");
             if (fa_wq && !module_exiting) {
                 queue_delayed_work(fa_wq, &screen_off_work,
                                   msecs_to_jiffies(SCREEN_OFF_DELAY_MS));
