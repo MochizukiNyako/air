@@ -843,41 +843,82 @@ static void load_boost_config(void)
     char *pkg_end = NULL;
     int current_category = -1;
     int i = 0;
+    ssize_t bytes_read;
+    
+    pr_info("开始加载boost配置...\n");
     
     free_categories();
+    
+    pr_info("打开文件: %s\n", BOOST_JSON_PATH);
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
+        pr_err("无法打开文件: %s, 错误码: %ld\n", BOOST_JSON_PATH, PTR_ERR(fp));
         return;
     }
+    pr_info("文件打开成功\n");
     
     json = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!json) {
+        pr_err("内存分配失败\n");
+        filp_close(fp, NULL);
+        return;
+    }
+    pr_info("分配内存: %d字节\n", MAX_JSON_FILE_SIZE);
+    
+    bytes_read = kernel_read(fp, json, MAX_JSON_FILE_SIZE - 1, &pos);
+    pr_info("读取字节数: %ld\n", bytes_read);
+    
+    if (bytes_read <= 0) {
+        pr_err("读取文件失败\n");
+        kfree(json);
         filp_close(fp, NULL);
         return;
     }
     
-    kernel_read(fp, json, MAX_JSON_FILE_SIZE - 1, &pos);
+    json[bytes_read] = '\0';
+    pr_info("文件内容前100字节: %.100s\n", json);
+    
     filp_close(fp, NULL);
     
     mutex_lock(&category_lock);
+
+    if (!fa_strtok_r) {
+        pr_err("fa_strtok_r函数未定义\n");
+        mutex_unlock(&category_lock);
+        kfree(json);
+        return;
+    }
+    
     line = fa_strtok_r(json, "\n", &saveptr);
+    pr_info("开始解析JSON, 第一行: %s\n", line ? line : "NULL");
+    
     while (line != NULL) {
+        pr_debug("处理行: %s\n", line);
+        
         if (strstr(line, "[\"0-3\"")) {
             current_category = 0;
             i = 0;
+            pr_info("发现分类: 0-3 (小核心)\n");
         } else if (strstr(line, "[\"4-7\"")) {
             current_category = 1;
             i = 0;
+            pr_info("发现分类: 4-7 (大核心)\n");
         } else if (strstr(line, "[\"0-7\"")) {
             current_category = 2;
             i = 0;
+            pr_info("发现分类: 0-7 (全核心)\n");
         } else if (current_category >= 0) {
+            pr_debug("当前分类: %d, i=%d\n", current_category, i);
+            
             if (strstr(line, "\"")) {
+                pr_debug("行包含引号: %s\n", line);
                 pkg_start = strchr(line, '\"');
                 if (pkg_start) {
                     pkg_end = strchr(pkg_start + 1, '\"');
                     if (pkg_end && pkg_end > pkg_start + 1) {
                         size_t len = pkg_end - pkg_start - 1;
+                        pr_debug("包名长度: %zu, 内容: %.*s\n", len, (int)len, pkg_start + 1);
+                        
                         if (len > 0 && len < MAX_PACKAGE_NAME_LEN && i < MAX_APPS_PER_CATEGORY) {
                             app_categories[current_category][i] = kzalloc(len + 1, GFP_KERNEL);
                             if (app_categories[current_category][i]) {
@@ -894,11 +935,24 @@ static void load_boost_config(void)
                                 
                                 i++;
                                 app_counts[current_category] = i;
+                                pr_debug("分类%d计数更新为: %d\n", current_category, i);
+                            } else {
+                                pr_err("内存分配失败 for app name\n");
                             }
+                        } else {
+                            pr_warn("包名长度无效或超过限制: len=%zu, MAX=%d, i=%d, MAX_APPS=%d\n", 
+                                   len, MAX_PACKAGE_NAME_LEN, i, MAX_APPS_PER_CATEGORY);
                         }
+                    } else {
+                        pr_debug("未找到结束引号\n");
                     }
+                } else {
+                    pr_debug("未找到开始引号\n");
                 }
+            } else {
+                pr_debug("行不包含引号: %s\n", line);
             }
+            
             if (strstr(line, "]")) {
                 const char *category_name = "";
                 switch(current_category) {
@@ -906,20 +960,23 @@ static void load_boost_config(void)
                     case 1: category_name = "4-7(中核心)"; break;
                     case 2: category_name = "0-7(大核心)"; break;
                 }
-                pr_info("分类 %s 共 %d 个应用\n", category_name, i);
+                pr_info("分类 %s 结束, 共 %d 个应用\n", category_name, i);
                 current_category = -1;
             }
         }
         line = fa_strtok_r(NULL, "\n", &saveptr);
     }
     mutex_unlock(&category_lock);
-    
-    pr_info("配置加载完成:\n");
+
+    pr_info("配置加载完成总结:\n");
     pr_info("  小核心(0-3)应用数: %d\n", app_counts[0]);
-    pr_info("  中核心(4-7)应用数: %d\n", app_counts[1]);
-    pr_info("  大核心(0-7)应用数: %d\n", app_counts[2]);
+    pr_info("  大核心(4-7)应用数: %d\n", app_counts[1]);
+    pr_info("  全核心(0-7)应用数: %d\n", app_counts[2]);
+
+    print_boost_config();
     
     kfree(json);
+    pr_info("Boost配置加载结束\n");
 }
 
 static void print_boost_config(void)
