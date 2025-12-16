@@ -843,18 +843,22 @@ static void load_boost_config(void)
     char *pkg_end = NULL;
     int current_category = -1;
     int i = 0;
+    
     free_categories();
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
         return;
     }
+    
     json = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!json) {
         filp_close(fp, NULL);
         return;
     }
+    
     kernel_read(fp, json, MAX_JSON_FILE_SIZE - 1, &pos);
     filp_close(fp, NULL);
+    
     mutex_lock(&category_lock);
     line = fa_strtok_r(json, "\n", &saveptr);
     while (line != NULL) {
@@ -879,6 +883,15 @@ static void load_boost_config(void)
                             if (app_categories[current_category][i]) {
                                 strncpy(app_categories[current_category][i], pkg_start + 1, len);
                                 app_categories[current_category][i][len] = '\0';
+                                
+                                const char *category_name = "";
+                                switch(current_category) {
+                                    case 0: category_name = "0-3(小核心)"; break;
+                                    case 1: category_name = "4-7(中核心)"; break;
+                                    case 2: category_name = "0-7(大核心)"; break;
+                                }
+                                pr_info("策略: %s -> 包名: %s\n", category_name, app_categories[current_category][i]);
+                                
                                 i++;
                                 app_counts[current_category] = i;
                             }
@@ -887,13 +900,71 @@ static void load_boost_config(void)
                 }
             }
             if (strstr(line, "]")) {
+                const char *category_name = "";
+                switch(current_category) {
+                    case 0: category_name = "0-3(小核心)"; break;
+                    case 1: category_name = "4-7(中核心)"; break;
+                    case 2: category_name = "0-7(大核心)"; break;
+                }
+                pr_info("分类 %s 共 %d 个应用\n", category_name, i);
                 current_category = -1;
             }
         }
         line = fa_strtok_r(NULL, "\n", &saveptr);
     }
     mutex_unlock(&category_lock);
+    
+    pr_info("配置加载完成:\n");
+    pr_info("  小核心(0-3)应用数: %d\n", app_counts[0]);
+    pr_info("  中核心(4-7)应用数: %d\n", app_counts[1]);
+    pr_info("  大核心(0-7)应用数: %d\n", app_counts[2]);
+    
     kfree(json);
+}
+
+static void print_boost_config(void)
+{
+    int i;
+    
+    mutex_lock(&category_lock);
+    
+    pr_info("========== 当前CPU调频策略配置 ==========\n");
+    
+    if (app_counts[0] > 0) {
+        pr_info("\n小核心(0-3)策略 - 共%d个应用:\n", app_counts[0]);
+        for (i = 0; i < app_counts[0]; i++) {
+            if (app_categories[0][i]) {
+                pr_info("  [%d] %s\n", i + 1, app_categories[0][i]);
+            }
+        }
+    } else {
+        pr_info("\n小核心(0-3)策略: 无应用\n");
+    }
+    
+    if (app_counts[1] > 0) {
+        pr_info("\n中核心(4-7)策略 - 共%d个应用:\n", app_counts[1]);
+        for (i = 0; i < app_counts[1]; i++) {
+            if (app_categories[1][i]) {
+                pr_info("  [%d] %s\n", i + 1, app_categories[1][i]);
+            }
+        }
+    } else {
+        pr_info("\n中核心(4-7)策略: 无应用\n");
+    }
+    
+    if (app_counts[2] > 0) {
+        pr_info("\n大核心(0-7)策略 - 共%d个应用:\n", app_counts[2]);
+        for (i = 0; i < app_counts[2]; i++) {
+            if (app_categories[2][i]) {
+                pr_info("  [%d] %s\n", i + 1, app_categories[2][i]);
+            }
+        }
+    } else {
+        pr_info("\n大核心(0-7)策略: 无应用\n");
+    }
+    
+    pr_info("=======================================\n");
+    mutex_unlock(&category_lock);
 }
 
 static ssize_t save_boost_config(void)
