@@ -843,30 +843,37 @@ static void load_boost_config(void)
     bool expect_category = false;
     int idx[3] = {0, 0, 0};
 
+    printk(KERN_ERR "FA: load_boost_config enter\n");
+
     if (!is_data_mounted()) {
-        pr_info("FA: /data not mounted yet, skip load_boost_config\n");
+        printk(KERN_ERR "FA: /data not mounted, abort load\n");
         return;
     }
 
-    pr_info("FA: load_boost_config start\n");
+    printk(KERN_ERR "FA: /data mounted, continue\n");
 
     free_categories();
 
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
-        pr_err("FA: open failed %s\n", BOOST_JSON_PATH);
+        printk(KERN_ERR "FA: open failed path=%s err=%ld\n",
+               BOOST_JSON_PATH, PTR_ERR(fp));
         return;
     }
 
+    printk(KERN_ERR "FA: open success path=%s\n", BOOST_JSON_PATH);
+
     buf = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!buf) {
-        pr_err("FA: kzalloc failed\n");
+        printk(KERN_ERR "FA: kzalloc failed size=%d\n", MAX_JSON_FILE_SIZE);
         filp_close(fp, NULL);
         return;
     }
 
     kernel_read(fp, buf, MAX_JSON_FILE_SIZE - 1, &pos);
     filp_close(fp, NULL);
+
+    printk(KERN_ERR "FA: file read done bytes=%lld\n", pos);
 
     mutex_lock(&category_lock);
 
@@ -881,6 +888,8 @@ static void load_boost_config(void)
         }
 
         if (*p == ']') {
+            printk(KERN_ERR "FA: category end c0=%d c1=%d c2=%d\n",
+                   idx[0], idx[1], idx[2]);
             current_category = -1;
             expect_category = false;
             p++;
@@ -902,15 +911,19 @@ static void load_boost_config(void)
         *p = '\0';
 
         if (expect_category) {
-            if (!strcmp(str, "0-3"))
+            if (!strcmp(str, "0-3")) {
                 current_category = 0;
-            else if (!strcmp(str, "4-7"))
+                printk(KERN_ERR "FA: category switch -> 0-3\n");
+            } else if (!strcmp(str, "4-7")) {
                 current_category = 1;
-            else if (!strcmp(str, "0-7"))
+                printk(KERN_ERR "FA: category switch -> 4-7\n");
+            } else if (!strcmp(str, "0-7")) {
                 current_category = 2;
-            else
+                printk(KERN_ERR "FA: category switch -> 0-7\n");
+            } else {
                 current_category = -1;
-
+                printk(KERN_ERR "FA: unknown category %s\n", str);
+            }
             expect_category = false;
         } else if (current_category >= 0 &&
                    idx[current_category] < MAX_APPS_PER_CATEGORY) {
@@ -921,9 +934,18 @@ static void load_boost_config(void)
                     kzalloc(len + 1, GFP_KERNEL);
                 if (app_categories[current_category][idx[current_category]]) {
                     strcpy(app_categories[current_category][idx[current_category]], str);
+                    printk(KERN_ERR "FA: add app c=%d idx=%d pkg=%s\n",
+                           current_category,
+                           idx[current_category],
+                           app_categories[current_category][idx[current_category]]);
                     idx[current_category]++;
                     app_counts[current_category] = idx[current_category];
+                } else {
+                    printk(KERN_ERR "FA: alloc app failed c=%d pkg=%s\n",
+                           current_category, str);
                 }
+            } else {
+                printk(KERN_ERR "FA: invalid pkg len=%zu name=%s\n", len, str);
             }
         }
 
@@ -933,8 +955,8 @@ static void load_boost_config(void)
     mutex_unlock(&category_lock);
     kfree(buf);
 
-    pr_info("FA: load_boost_config done c0=%d c1=%d c2=%d\n",
-            app_counts[0], app_counts[1], app_counts[2]);
+    printk(KERN_ERR "FA: load_boost_config done total c0=%d c1=%d c2=%d\n",
+           app_counts[0], app_counts[1], app_counts[2]);
 }
 
 static ssize_t save_boost_config(void)
@@ -1193,7 +1215,7 @@ static struct notifier_block fb_notifier = {
 
 static int __init fair_scheduler_init(void)
 {
-    printk(KERN_INFO "Fair Scheduler Initializing\n");
+    printk(KERN_ERR "FA: fair_scheduler_init reached\n");
     init_masks();
     init_fa_core_states();
     spin_lock_init(&task_list_lock);
