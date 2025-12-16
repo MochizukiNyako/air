@@ -858,13 +858,13 @@ static void load_boost_config(void)
     mutex_lock(&category_lock);
     line = fa_strtok_r(json, "\n", &saveptr);
     while (line != NULL) {
-        if (strstr(line, "[0-3")) {
+        if (strstr(line, "[\"0-3\"")) {
             current_category = 0;
             i = 0;
-        } else if (strstr(line, "[4-7")) {
+        } else if (strstr(line, "[\"4-7\"")) {
             current_category = 1;
             i = 0;
-        } else if (strstr(line, "[0-7")) {
+        } else if (strstr(line, "[\"0-7\"")) {
             current_category = 2;
             i = 0;
         } else if (current_category >= 0) {
@@ -910,7 +910,7 @@ static ssize_t save_boost_config(void)
     len += snprintf(json + len, json_size - len, "[\n");
     mutex_lock(&category_lock);
     if (app_counts[0] > 0) {
-        len += snprintf(json + len, json_size - len, "    [0-3,\n");
+        len += snprintf(json + len, json_size - len, "    [\"0-3\",\n");
         for (i = 0; i < app_counts[0]; i++) {
             if (app_categories[0][i]) {
                 len += snprintf(json + len, json_size - len, "        \"%s\",\n", app_categories[0][i]);
@@ -924,7 +924,7 @@ static ssize_t save_boost_config(void)
         len += snprintf(json + len, json_size - len, "    ],\n");
     }
     if (app_counts[1] > 0) {
-        len += snprintf(json + len, json_size - len, "    [4-7,\n");
+        len += snprintf(json + len, json_size - len, "    [\"4-7\",\n");
         for (i = 0; i < app_counts[1]; i++) {
             if (app_categories[1][i]) {
                 len += snprintf(json + len, json_size - len, "        \"%s\",\n", app_categories[1][i]);
@@ -938,7 +938,7 @@ static ssize_t save_boost_config(void)
         len += snprintf(json + len, json_size - len, "    ],\n");
     }
     if (app_counts[2] > 0) {
-        len += snprintf(json + len, json_size - len, "    [0-7,\n");
+        len += snprintf(json + len, json_size - len, "    [\"0-7\",\n");
         for (i = 0; i < app_counts[2]; i++) {
             if (app_categories[2][i]) {
                 len += snprintf(json + len, json_size - len, "        \"%s\",\n", app_categories[2][i]);
