@@ -25,6 +25,9 @@
 #include <linux/vmalloc.h>
 #include <linux/list.h>
 #include <linux/ctype.h>
+#include <linux/mount.h>
+#include <linux/namei.h>
+#include <linux/path.h>
 
 #define LOCK_FREQ_KHZ 300000U
 #define LITTLE_CORE_IDLE_FREQ_KHZ 200000U
@@ -162,6 +165,30 @@ static void init_fa_core_states(void)
         fa_core_states[i].load_val = 0;
         fa_core_states[i].cpufreq_policy = NULL;
     }
+}
+
+static bool is_data_mounted(void)
+{
+    struct path path;
+    int ret;
+    
+    ret = kern_path("/data", LOOKUP_FOLLOW, &path);
+    if (ret) {
+        return false;
+    }
+    
+    if (path.dentry && path.dentry->d_sb) {
+        if (path.dentry->d_sb->s_flags & SB_RDONLY) {
+            path_put(&path);
+            return false;
+        }
+        path_put(&path);
+        return true;
+    }
+    
+    if (path.dentry)
+        path_put(&path);
+    return false;
 }
 
 static bool check_cpufreq_ready(void)
@@ -832,7 +859,7 @@ static char *fa_strtok_r(char *str, const char *delim, char **saveptr)
     return token;
 }
 
-static void load_boost_config(void)
+static bool try_load_boost_config(void)
 {
     struct file *fp;
     loff_t pos = 0;
@@ -843,27 +870,24 @@ static void load_boost_config(void)
     bool expect_category = false;
     int idx[3] = {0, 0, 0};
 
-    pr_info("FA: load_boost_config start\n");
-
-    panic("FA: PANIC TEST\n");
+    if (!is_data_mounted()) {
+        return false;
+    }
 
     free_categories();
 
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
-        pr_err("FA: open failed %s\n", BOOST_JSON_PATH);
-        return;
+        return false;
     }
 
     buf = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!buf) {
-        pr_err("FA: kzalloc failed\n");
         filp_close(fp, NULL);
-        return;
+        return false;
     }
 
     kernel_read(fp, buf, MAX_JSON_FILE_SIZE - 1, &pos);
-    pr_info("FA: read %lld bytes\n", pos);
     filp_close(fp, NULL);
 
     mutex_lock(&category_lock);
@@ -874,15 +898,11 @@ static void load_boost_config(void)
         if (*p == '[') {
             expect_category = true;
             current_category = -1;
-            pr_info("FA: sub array begin\n");
             p++;
             continue;
         }
 
         if (*p == ']') {
-            pr_info("FA: sub array end, category=%d count=%d\n",
-                    current_category,
-                    current_category >= 0 ? app_counts[current_category] : -1);
             current_category = -1;
             expect_category = false;
             p++;
@@ -899,7 +919,6 @@ static void load_boost_config(void)
             p++;
 
         if (*p != '"') {
-            pr_err("FA: string parse error\n");
             break;
         }
 
@@ -908,15 +927,11 @@ static void load_boost_config(void)
         if (expect_category) {
             if (!strcmp(str, "0-3")) {
                 current_category = 0;
-                pr_info("FA: enter category 0-3\n");
             } else if (!strcmp(str, "4-7")) {
                 current_category = 1;
-                pr_info("FA: enter category 4-7\n");
             } else if (!strcmp(str, "0-7")) {
                 current_category = 2;
-                pr_info("FA: enter category 0-7\n");
             } else {
-                pr_err("FA: unknown category %s\n", str);
                 current_category = -1;
             }
             expect_category = false;
@@ -931,15 +946,9 @@ static void load_boost_config(void)
                     kzalloc(len + 1, GFP_KERNEL);
                 if (app_categories[current_category][idx[current_category]]) {
                     strcpy(app_categories[current_category][idx[current_category]], str);
-                    pr_info("FA: add %s to category %d index %d\n",
-                            str, current_category, idx[current_category]);
                     idx[current_category]++;
                     app_counts[current_category] = idx[current_category];
-                } else {
-                    pr_err("FA: alloc failed for %s\n", str);
                 }
-            } else {
-                pr_err("FA: invalid pkg len %zu %s\n", len, str);
             }
         }
 
@@ -949,8 +958,19 @@ static void load_boost_config(void)
     mutex_unlock(&category_lock);
     kfree(buf);
 
-    pr_info("FA: load_boost_config end c0=%d c1=%d c2=%d\n",
-            app_counts[0], app_counts[1], app_counts[2]);
+    return true;
+}
+
+static void load_boost_config(void)
+{
+    int retries = 10;
+    
+    while (retries-- > 0) {
+        if (try_load_boost_config()) {
+            break;
+        }
+        msleep(1000);
+    }
 }
 
 static ssize_t save_boost_config(void)
@@ -961,6 +981,11 @@ static ssize_t save_boost_config(void)
     int json_size = MAX_JSON_FILE_SIZE;
     int len = 0;
     int i;
+    
+    if (!is_data_mounted()) {
+        return -ENODEV;
+    }
+    
     json = kzalloc(json_size, GFP_KERNEL);
     if (!json)
         return -ENOMEM;
@@ -1027,6 +1052,10 @@ static void scan_installed_apps(void)
     struct file *fp = NULL;
     char dir_name[256];
     char *dash;
+    
+    if (!is_data_mounted()) {
+        return;
+    }
     
     fp = filp_open("/data/app", O_RDONLY | O_DIRECTORY, 0);
     if (!IS_ERR(fp)) {
