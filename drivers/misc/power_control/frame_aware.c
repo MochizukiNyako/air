@@ -25,9 +25,8 @@
 #include <linux/vmalloc.h>
 #include <linux/list.h>
 #include <linux/ctype.h>
-#include <linux/mount.h>
 #include <linux/namei.h>
-#include <linux/path.h>
+#include <linux/mount.h>
 
 #define LOCK_FREQ_KHZ 300000U
 #define LITTLE_CORE_IDLE_FREQ_KHZ 200000U
@@ -106,6 +105,27 @@ static struct delayed_work idle_check_work;
 static struct delayed_work freq_adjust_work;
 static struct workqueue_struct *fa_wq;
 
+static bool is_data_mounted(void)
+{
+    struct path path;
+    const char *fs_name;
+    int ret;
+
+    ret = kern_path("/data", LOOKUP_FOLLOW, &path);
+    if (ret)
+        return false;
+
+    fs_name = path.mnt->mnt_sb->s_type->name;
+
+    if (!strcmp(fs_name, "rootfs") || !strcmp(fs_name, "tmpfs")) {
+        path_put(&path);
+        return false;
+    }
+
+    path_put(&path);
+    return true;
+}
+
 struct task_info {
     pid_t pid;
     char package_name[MAX_PACKAGE_NAME_LEN];
@@ -165,30 +185,6 @@ static void init_fa_core_states(void)
         fa_core_states[i].load_val = 0;
         fa_core_states[i].cpufreq_policy = NULL;
     }
-}
-
-static bool is_data_mounted(void)
-{
-    struct path path;
-    int ret;
-    
-    ret = kern_path("/data", LOOKUP_FOLLOW, &path);
-    if (ret) {
-        return false;
-    }
-    
-    if (path.dentry && path.dentry->d_sb) {
-        if (path.dentry->d_sb->s_flags & SB_RDONLY) {
-            path_put(&path);
-            return false;
-        }
-        path_put(&path);
-        return true;
-    }
-    
-    if (path.dentry)
-        path_put(&path);
-    return false;
 }
 
 static bool check_cpufreq_ready(void)
@@ -836,30 +832,7 @@ static void free_categories(void)
     mutex_unlock(&category_lock);
 }
 
-static char *fa_strtok_r(char *str, const char *delim, char **saveptr)
-{
-    char *token;
-    if (!str)
-        str = *saveptr;
-    if (!str)
-        return NULL;
-    str += strspn(str, delim);
-    if (*str == '\0') {
-        *saveptr = NULL;
-        return NULL;
-    }
-    token = str;
-    str = strpbrk(token, delim);
-    if (str) {
-        *str = '\0';
-        *saveptr = str + 1;
-    } else {
-        *saveptr = NULL;
-    }
-    return token;
-}
-
-static bool try_load_boost_config(void)
+static void load_boost_config(void)
 {
     struct file *fp;
     loff_t pos = 0;
@@ -871,20 +844,25 @@ static bool try_load_boost_config(void)
     int idx[3] = {0, 0, 0};
 
     if (!is_data_mounted()) {
-        return false;
+        pr_info("FA: /data not mounted yet, skip load_boost_config\n");
+        return;
     }
+
+    pr_info("FA: load_boost_config start\n");
 
     free_categories();
 
     fp = filp_open(BOOST_JSON_PATH, O_RDONLY, 0);
     if (IS_ERR(fp)) {
-        return false;
+        pr_err("FA: open failed %s\n", BOOST_JSON_PATH);
+        return;
     }
 
     buf = kzalloc(MAX_JSON_FILE_SIZE, GFP_KERNEL);
     if (!buf) {
+        pr_err("FA: kzalloc failed\n");
         filp_close(fp, NULL);
-        return false;
+        return;
     }
 
     kernel_read(fp, buf, MAX_JSON_FILE_SIZE - 1, &pos);
@@ -918,27 +896,24 @@ static bool try_load_boost_config(void)
         while (*p && *p != '"')
             p++;
 
-        if (*p != '"') {
+        if (*p != '"')
             break;
-        }
 
         *p = '\0';
 
         if (expect_category) {
-            if (!strcmp(str, "0-3")) {
+            if (!strcmp(str, "0-3"))
                 current_category = 0;
-            } else if (!strcmp(str, "4-7")) {
+            else if (!strcmp(str, "4-7"))
                 current_category = 1;
-            } else if (!strcmp(str, "0-7")) {
+            else if (!strcmp(str, "0-7"))
                 current_category = 2;
-            } else {
+            else
                 current_category = -1;
-            }
-            expect_category = false;
-        }
 
-        else if (current_category >= 0 &&
-                 idx[current_category] < MAX_APPS_PER_CATEGORY) {
+            expect_category = false;
+        } else if (current_category >= 0 &&
+                   idx[current_category] < MAX_APPS_PER_CATEGORY) {
 
             size_t len = strlen(str);
             if (len > 0 && len < MAX_PACKAGE_NAME_LEN) {
@@ -958,19 +933,8 @@ static bool try_load_boost_config(void)
     mutex_unlock(&category_lock);
     kfree(buf);
 
-    return true;
-}
-
-static void load_boost_config(void)
-{
-    int retries = 10;
-    
-    while (retries-- > 0) {
-        if (try_load_boost_config()) {
-            break;
-        }
-        msleep(1000);
-    }
+    pr_info("FA: load_boost_config done c0=%d c1=%d c2=%d\n",
+            app_counts[0], app_counts[1], app_counts[2]);
 }
 
 static ssize_t save_boost_config(void)
@@ -981,11 +945,6 @@ static ssize_t save_boost_config(void)
     int json_size = MAX_JSON_FILE_SIZE;
     int len = 0;
     int i;
-    
-    if (!is_data_mounted()) {
-        return -ENODEV;
-    }
-    
     json = kzalloc(json_size, GFP_KERNEL);
     if (!json)
         return -ENOMEM;
@@ -1052,10 +1011,6 @@ static void scan_installed_apps(void)
     struct file *fp = NULL;
     char dir_name[256];
     char *dash;
-    
-    if (!is_data_mounted()) {
-        return;
-    }
     
     fp = filp_open("/data/app", O_RDONLY | O_DIRECTORY, 0);
     if (!IS_ERR(fp)) {
