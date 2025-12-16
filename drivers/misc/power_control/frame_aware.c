@@ -843,7 +843,9 @@ static void load_boost_config(void)
     bool expect_category = false;
     int idx[3] = {0, 0, 0};
 
-    pr_err("FA: load_boost_config start\n");
+    pr_info("FA: load_boost_config start\n");
+
+    panic("FA: PANIC TEST\n");
 
     free_categories();
 
@@ -861,7 +863,7 @@ static void load_boost_config(void)
     }
 
     kernel_read(fp, buf, MAX_JSON_FILE_SIZE - 1, &pos);
-    pr_err("FA: read %lld bytes\n", pos);
+    pr_info("FA: read %lld bytes\n", pos);
     filp_close(fp, NULL);
 
     mutex_lock(&category_lock);
@@ -872,15 +874,15 @@ static void load_boost_config(void)
         if (*p == '[') {
             expect_category = true;
             current_category = -1;
-            pr_err("FA: sub array begin\n");
+            pr_info("FA: sub array begin\n");
             p++;
             continue;
         }
 
         if (*p == ']') {
-            pr_err("FA: sub array end, category=%d count=%d\n",
-                   current_category,
-                   current_category >= 0 ? app_counts[current_category] : -1);
+            pr_info("FA: sub array end, category=%d count=%d\n",
+                    current_category,
+                    current_category >= 0 ? app_counts[current_category] : -1);
             current_category = -1;
             expect_category = false;
             p++;
@@ -906,13 +908,13 @@ static void load_boost_config(void)
         if (expect_category) {
             if (!strcmp(str, "0-3")) {
                 current_category = 0;
-                pr_err("FA: enter category 0-3\n");
+                pr_info("FA: enter category 0-3\n");
             } else if (!strcmp(str, "4-7")) {
                 current_category = 1;
-                pr_err("FA: enter category 4-7\n");
+                pr_info("FA: enter category 4-7\n");
             } else if (!strcmp(str, "0-7")) {
                 current_category = 2;
-                pr_err("FA: enter category 0-7\n");
+                pr_info("FA: enter category 0-7\n");
             } else {
                 pr_err("FA: unknown category %s\n", str);
                 current_category = -1;
@@ -929,8 +931,8 @@ static void load_boost_config(void)
                     kzalloc(len + 1, GFP_KERNEL);
                 if (app_categories[current_category][idx[current_category]]) {
                     strcpy(app_categories[current_category][idx[current_category]], str);
-                    pr_err("FA: add %s to category %d index %d\n",
-                           str, current_category, idx[current_category]);
+                    pr_info("FA: add %s to category %d index %d\n",
+                            str, current_category, idx[current_category]);
                     idx[current_category]++;
                     app_counts[current_category] = idx[current_category];
                 } else {
@@ -947,8 +949,8 @@ static void load_boost_config(void)
     mutex_unlock(&category_lock);
     kfree(buf);
 
-    pr_err("FA: load_boost_config end c0=%d c1=%d c2=%d\n",
-           app_counts[0], app_counts[1], app_counts[2]);
+    pr_info("FA: load_boost_config end c0=%d c1=%d c2=%d\n",
+            app_counts[0], app_counts[1], app_counts[2]);
 }
 
 static ssize_t save_boost_config(void)
