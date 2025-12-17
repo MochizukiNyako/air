@@ -120,16 +120,17 @@ struct ab8500_fg_cap_scaling {
 };
 
 struct ab8500_fg_battery_capacity {
-	int max_mah_design;
-	int max_mah;
-	int mah;
-	int permille;
-	int level;
-	int prev_mah;
-	int prev_percent;
-	int prev_level;
-	int user_mah;
-	struct ab8500_fg_cap_scaling cap_scale;
+    int max_mah_design;
+    int max_mah;
+    int mah;
+    int permille;
+    int level;
+    int prev_mah;
+    int prev_percent;
+    int prev_level;
+    int user_mah;
+    bool max_mah_user_set;
+    struct ab8500_fg_cap_scaling cap_scale;
 };
 
 struct ab8500_fg_flags {
@@ -2210,7 +2211,9 @@ static int ab8500_fg_get_ext_psy_data(struct device *dev, void *data)
 					di->flags.fully_charged = true;
 					di->flags.force_full = true;
 					/* Save current capacity as maximum */
-					di->bat_cap.max_mah = di->bat_cap.mah;
+					if (!di->bat_cap.max_mah_user_set) {
+    					di->bat_cap.max_mah = di->bat_cap.mah;
+					}
 					queue_work(di->fg_wq, &di->fg_work);
 					break;
 				case POWER_SUPPLY_STATUS_CHARGING:
@@ -2243,9 +2246,11 @@ static int ab8500_fg_get_ext_psy_data(struct device *dev, void *data)
 						MILLI_TO_MICRO *
 						b->charge_full_design;
 
-					di->bat_cap.max_mah =
-						di->bat_cap.max_mah_design;
-
+					if (!di->bat_cap.max_mah_user_set) {
+						di->bat_cap.max_mah =
+							di->bat_cap.max_mah_design;
+					}
+				
 					di->vbat_nom = b->nominal_voltage;
 				}
 
@@ -2441,7 +2446,11 @@ static ssize_t charge_full_store(struct ab8500_fg *di, const char *buf,
 	if (ret)
 		return ret;
 
-	di->bat_cap.max_mah = (int) charge_full;
+	if (!di->bat_cap.max_mah_user_set) {
+    	di->bat_cap.max_mah = (int) charge_full;
+    	di->bat_cap.max_mah_user_set = true;
+	}
+
 	return count;
 }
 
@@ -3074,7 +3083,9 @@ static int ab8500_fg_probe(struct platform_device *pdev)
 	di->bat_cap.max_mah_design = MILLI_TO_MICRO *
 		di->bm->bat_type[di->bm->batt_id].charge_full_design;
 
-	di->bat_cap.max_mah = di->bat_cap.max_mah_design;
+	if (!di->bat_cap.max_mah_user_set) {
+		di->bat_cap.max_mah = di->bat_cap.max_mah_design;
+	}
 
 	di->vbat_nom = di->bm->bat_type[di->bm->batt_id].nominal_voltage;
 
